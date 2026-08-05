@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import pytorch_lightning as pl
+import time
 from torch.optim.lr_scheduler import LambdaLR
 from einops import rearrange, repeat
 from contextlib import contextmanager
@@ -24,6 +25,8 @@ from ldm.modules.distributions.distributions import normal_kl, DiagonalGaussianD
 from ldm.models.autoencoder import VQModelInterface, IdentityFirstStage, AutoencoderKL
 from ldm.modules.diffusionmodules.util import make_beta_schedule, extract_into_tensor, noise_like
 from ldm.models.diffusion.ddim import DDIMSampler
+
+from blpytorch.utils.cuda_tracker import get_gpu_stats
 
 
 __conditioning_keys__ = {'concat': 'c_concat',
@@ -348,6 +351,9 @@ class DDPM(pl.LightningModule):
         self.log("global_step", self.global_step,
                  prog_bar=True, logger=True, on_step=True, on_epoch=False)
 
+        if self.global_step % 100 == 0:
+            print(f"step: {self.global_step}: {get_gpu_stats()}")
+
         if self.use_scheduler:
             lr = self.optimizers().param_groups[0]['lr']
             self.log('lr_abs', lr, prog_bar=True, logger=True, on_step=True, on_epoch=False)
@@ -468,6 +474,10 @@ class LatentDiffusion(DDPM):
             self.init_from_ckpt(ckpt_path, ignore_keys)
             self.restarted_from_ckpt = True
 
+        # time tracking
+        self._previous_batch_end = None
+        self._batch_start = None
+
     def make_cond_schedule(self, ):
         self.cond_ids = torch.full(size=(self.num_timesteps,), fill_value=self.num_timesteps - 1, dtype=torch.long)
         ids = torch.round(torch.linspace(0, self.num_timesteps - 1, self.num_timesteps_cond)).long()
@@ -489,6 +499,41 @@ class LatentDiffusion(DDPM):
             self.register_buffer('scale_factor', 1. / z.flatten().std())
             print(f"setting self.scale_factor to {self.scale_factor}")
             print("### USING STD-RESCALING ###")
+
+        now = time.perf_counter()
+
+        if self._previous_batch_end is not None:
+            data_wait_time = now - self._previous_batch_end
+
+            self.log(
+                "time/data_wait_ms",
+                data_wait_time * 1000,
+                on_step=True,
+                on_epoch=False,
+                prog_bar=True,
+                sync_dist=False,
+            )
+
+        self._batch_start = now
+
+
+    def on_train_batch_end(self, *args, **kwargs):
+        if self.use_ema:
+            self.model_ema(self.model)
+            
+        now = time.perf_counter()
+
+        step_time = now - self._batch_start
+
+        self.log(
+            "time/train_step_ms",
+            step_time * 1000,
+            on_step=True,
+            on_epoch=False,
+            sync_dist=False,
+        )
+
+        self._previous_batch_end = now
 
     def register_schedule(self,
                           given_betas=None, beta_schedule="linear", timesteps=1000,
