@@ -12,7 +12,8 @@ class LSUNBase(Dataset):
                  data_root,
                  size=None,
                  interpolation="bicubic",
-                 flip_p=0.5
+                 flip_p=0.5,
+                 return_uint8=False,
                  ):
         self.data_paths = txt_file
         self.data_root = data_root
@@ -32,6 +33,7 @@ class LSUNBase(Dataset):
                               "lanczos": PIL.Image.LANCZOS,
                               }[interpolation]
         self.flip = transforms.RandomHorizontalFlip(p=flip_p)
+        self.return_uint8 = return_uint8
 
     def __len__(self):
         return self._length
@@ -55,7 +57,10 @@ class LSUNBase(Dataset):
 
         image = self.flip(image)
         image = np.array(image).astype(np.uint8)
-        example["image"] = (image / 127.5 - 1.0).astype(np.float32)
+        if self.return_uint8:
+            example['image'] = image
+        else:
+            example["image"] = (image / 127.5 - 1.0).astype(np.float32)
         return example
 
 
