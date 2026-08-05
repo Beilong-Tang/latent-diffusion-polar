@@ -1,0 +1,6 @@
+__pycache__/
+logs/
+*.ckpt
+latent_diffusion.egg-info/
+data/lsun/
+.vscode/

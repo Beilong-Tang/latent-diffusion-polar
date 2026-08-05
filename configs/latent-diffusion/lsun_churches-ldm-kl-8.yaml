@@ -85,6 +85,8 @@ lightning:
         batch_frequency: 5000
         max_images: 8
         increase_log_steps: False
+        log_images_kwargs:
+          ddim_steps: null # disable using ddim sample steps
 
 
   trainer:

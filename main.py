@@ -20,6 +20,9 @@ from pytorch_lightning.utilities import rank_zero_info
 from ldm.data.base import Txt2ImgIterableBaseDataset
 from ldm.util import instantiate_from_config
 
+from blpytorch.utils.cuda_tracker import get_gpu_stats
+from pytorch_lightning.plugins import DDPPlugin
+
 
 def get_parser(**parser_kwargs):
     def str2bool(v):
@@ -393,6 +396,9 @@ class ImageLogger(Callback):
 
 
 class CUDACallback(Callback):
+    def __init__(self, log_every_n_steps=100):
+        self.log_every_n_steps=log_every_n_steps
+
     # see https://github.com/SeanNaren/minGPT/blob/master/mingpt/callback.py
     def on_train_epoch_start(self, trainer, pl_module):
         # Reset the memory use counter
@@ -413,6 +419,10 @@ class CUDACallback(Callback):
             rank_zero_info(f"Average Peak memory {max_memory:.2f}MiB")
         except AttributeError:
             pass
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+        if trainer.global_step % self.log_every_n_steps == 0:
+            rank_zero_info(get_gpu_stats(pl_module.device))
 
 
 if __name__ == "__main__":
@@ -656,8 +666,13 @@ if __name__ == "__main__":
 
         trainer_kwargs["callbacks"] = [instantiate_from_config(callbacks_cfg[k]) for k in callbacks_cfg]
 
+        # add plugins
+        trainer_kwargs['plugins'] = DDPPlugin(find_unused_parameters=False)
         trainer = Trainer.from_argparse_args(trainer_opt, **trainer_kwargs)
         trainer.logdir = logdir  ###
+
+        print(f"DEBUG max_epochs: {trainer.max_epochs}")
+        print(f"DEBUG max_steps: {trainer.max_steps}")
 
         # data
         data = instantiate_from_config(config.data)
