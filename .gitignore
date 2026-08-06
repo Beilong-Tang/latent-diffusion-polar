@@ -5,3 +5,4 @@ latent_diffusion.egg-info/
 data/lsun/
 .vscode/
 *.npy
+*.zip

@@ -123,6 +123,9 @@ def get_parser(**parser_kwargs):
         default=True,
         help="scale base-lr by ngpu * batch_size * n_accumulate",
     )
+    parser.add_argument('--resume_latest', action='store_true', help="if specified, always resume from the latest ckpt")
+    parser.add_argument('--load_cuda_data', action='store_true')
+    parser.add_argument('--max_epochs', default=1000, type = int)
     return parser
 
 
@@ -478,6 +481,19 @@ if __name__ == "__main__":
     parser = Trainer.add_argparse_args(parser)
 
     opt, unknown = parser.parse_known_args()
+
+    if opt.resume_latest:
+        files = os.listdir(opt.logdir)
+        assert len(opt.base) > 0
+        cfg_fname = os.path.split(opt.base[0])[-1]
+        cfg_name = os.path.splitext(cfg_fname)[0]
+        name = "_" + cfg_name
+        files = [ f for f in files if f.endswith(name)]
+        if len(files) != 0:
+            latest_file = max(files)
+            opt.resume = os.path.join(opt.logdir, latest_file, 'checkpoints', 'last.ckpt')
+
+
     if opt.name and opt.resume:
         raise ValueError(
             "-n/--name and -r/--resume cannot be specified both."
@@ -631,6 +647,12 @@ if __name__ == "__main__":
             "cuda_callback": {
                 "target": "main.CUDACallback"
             },
+            "progress":{
+                "target": "pytorch_lightning.callbacks.ProgressBar",
+                "params": {
+                    "refresh_rate": 10 # log every 10 iteras
+                }
+            }
         }
         if version.parse(pl.__version__) >= version.parse('1.4.0'):
             default_callbacks_cfg.update({'checkpoint_callback': modelckpt_cfg})
@@ -668,6 +690,7 @@ if __name__ == "__main__":
 
         # add plugins
         trainer_kwargs['plugins'] = DDPPlugin(find_unused_parameters=False)
+        trainer_kwargs['max_epochs'] = opt.max_epochs
         trainer = Trainer.from_argparse_args(trainer_opt, **trainer_kwargs)
         trainer.logdir = logdir  ###
 
@@ -684,6 +707,11 @@ if __name__ == "__main__":
         print("#### Data #####")
         for k in data.datasets:
             print(f"{k}, {data.datasets[k].__class__.__name__}, {len(data.datasets[k])}")
+        if opt.load_cuda_data:
+            _loader = data.train_dataloader()
+            images = _loader.dataset.images
+            print(f"len images: {len(images)}")
+            image_list = [ torch.from_numpy(images).to("cuda:0") for _ in range(2)]
 
         # configure learning rate
         bs, base_lr = config.data.params.batch_size, config.model.base_learning_rate

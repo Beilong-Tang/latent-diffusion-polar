@@ -27,6 +27,7 @@ from ldm.modules.diffusionmodules.util import make_beta_schedule, extract_into_t
 from ldm.models.diffusion.ddim import DDIMSampler
 
 from blpytorch.utils.cuda_tracker import get_gpu_stats
+from blpytorch.utils.dprint import dprint
 
 
 __conditioning_keys__ = {'concat': 'c_concat',
@@ -99,6 +100,7 @@ class DDPM(pl.LightningModule):
 
         self.v_posterior = v_posterior
         self.original_elbo_weight = original_elbo_weight
+        dprint(f"original_elbo_weight is {self.original_elbo_weight}")
         self.l_simple_weight = l_simple_weight
 
         if monitor is not None:
@@ -352,7 +354,7 @@ class DDPM(pl.LightningModule):
                  prog_bar=True, logger=True, on_step=True, on_epoch=False)
 
         if self.global_step % 100 == 0:
-            print(f"step: {self.global_step}: {get_gpu_stats()}")
+            self.print(f"step: {self.global_step}: {get_gpu_stats()}")
 
         if self.use_scheduler:
             lr = self.optimizers().param_groups[0]['lr']
@@ -501,7 +503,7 @@ class LatentDiffusion(DDPM):
             print("### USING STD-RESCALING ###")
 
         now = time.perf_counter()
-
+        dprint(f"is have split_input_params: {hasattr(self, 'split_input_params')}")
         if self._previous_batch_end is not None:
             data_wait_time = now - self._previous_batch_end
 
@@ -520,7 +522,7 @@ class LatentDiffusion(DDPM):
     def on_train_batch_end(self, *args, **kwargs):
         if self.use_ema:
             self.model_ema(self.model)
-            
+
         now = time.perf_counter()
 
         step_time = now - self._batch_start
@@ -703,7 +705,10 @@ class LatentDiffusion(DDPM):
             x = x[:bs]
         x = x.to(self.device)
         encoder_posterior = self.encode_first_stage(x)
-        z = self.get_first_stage_encoding(encoder_posterior).detach()
+        z = self.get_first_stage_encoding(encoder_posterior).detach() # std latent z
+
+        dprint(f"latent z shape: {z.shape}", "z_shape")
+        dprint(f"latent z type: {z.dtype}", "z_type")
 
         if self.model.conditioning_key is not None:
             if cond_key is None:
@@ -739,7 +744,8 @@ class LatentDiffusion(DDPM):
             if self.use_positional_encodings:
                 pos_x, pos_y = self.compute_latent_shifts(batch)
                 c = {'pos_x': pos_x, 'pos_y': pos_y}
-        out = [z, c]
+        out = [z, c] # tensor, None
+        dprint(f"c is {c}")
         if return_first_stage_outputs:
             xrec = self.decode_first_stage(z)
             out.extend([x, xrec])
@@ -908,7 +914,7 @@ class LatentDiffusion(DDPM):
             return self.first_stage_model.encode(x)
 
     def shared_step(self, batch, **kwargs):
-        x, c = self.get_input(batch, self.first_stage_key)
+        x, c = self.get_input(batch, self.first_stage_key) # latent z std , None
         loss = self(x, c)
         return loss
 
@@ -1073,6 +1079,7 @@ class LatentDiffusion(DDPM):
         loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
 
         logvar_t = self.logvar.to(self.device)[t].to(self.device)
+        dprint(f"logvar_t is {logvar_t}")
         loss = loss_simple / torch.exp(logvar_t) + logvar_t
         # loss = loss_simple / torch.exp(self.logvar) + self.logvar
         if self.learn_logvar:
@@ -1081,10 +1088,10 @@ class LatentDiffusion(DDPM):
 
         loss = self.l_simple_weight * loss.mean()
 
-        loss_vlb = self.get_loss(model_output, target, mean=False).mean(dim=(1, 2, 3))
-        loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
-        loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
-        loss += (self.original_elbo_weight * loss_vlb)
+        # loss_vlb = self.get_loss(model_output, target, mean=False).mean(dim=(1, 2, 3))
+        # loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
+        # loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
+        # loss += (self.original_elbo_weight * loss_vlb)
         loss_dict.update({f'{prefix}/loss': loss})
 
         return loss, loss_dict
@@ -1298,6 +1305,7 @@ class LatentDiffusion(DDPM):
                    plot_diffusion_rows=True, **kwargs):
 
         use_ddim = ddim_steps is not None
+        dprint(f"use_ddim is {use_ddim}")
 
         log = dict()
         z, c, x, xrec, xc = self.get_input(batch, self.first_stage_key,
