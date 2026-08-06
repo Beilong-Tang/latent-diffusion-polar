@@ -10,6 +10,7 @@ class LSUNBase(Dataset):
     def __init__(self,
                  txt_file,
                  data_root,
+                 npy_file = None,
                  size=None,
                  interpolation="bicubic",
                  flip_p=0.5,
@@ -19,6 +20,13 @@ class LSUNBase(Dataset):
         self.data_root = data_root
         with open(self.data_paths, "r") as f:
             self.image_paths = f.read().splitlines()
+        if npy_file is not None:
+            print(f"loading data from numpy file {npy_file}")
+            self.images = np.load(npy_file)
+            assert len(self.image_paths) == len(self.images)
+            self.use_npy = True
+        else:
+            self.use_npy = False
         self._length = len(self.image_paths)
         self.labels = {
             "relative_file_path_": [l for l in self.image_paths],
@@ -40,23 +48,26 @@ class LSUNBase(Dataset):
 
     def __getitem__(self, i):
         example = dict((k, self.labels[k][i]) for k in self.labels)
-        image = Image.open(example["file_path_"])
-        if not image.mode == "RGB":
-            image = image.convert("RGB")
+        if self.use_npy:
+            image = self.images[i]
+        else:
+            image = Image.open(example["file_path_"])
+            if not image.mode == "RGB":
+                image = image.convert("RGB")
 
-        # default to score-sde preprocessing
-        img = np.array(image).astype(np.uint8)
-        crop = min(img.shape[0], img.shape[1])
-        h, w, = img.shape[0], img.shape[1]
-        img = img[(h - crop) // 2:(h + crop) // 2,
-              (w - crop) // 2:(w + crop) // 2]
+            # default to score-sde preprocessing
+            img = np.array(image).astype(np.uint8)
+            crop = min(img.shape[0], img.shape[1])
+            h, w, = img.shape[0], img.shape[1]
+            img = img[(h - crop) // 2:(h + crop) // 2,
+                (w - crop) // 2:(w + crop) // 2]
 
-        image = Image.fromarray(img)
-        if self.size is not None:
-            image = image.resize((self.size, self.size), resample=self.interpolation)
+            image = Image.fromarray(img)
+            if self.size is not None:
+                image = image.resize((self.size, self.size), resample=self.interpolation)
 
-        image = self.flip(image)
-        image = np.array(image).astype(np.uint8)
+            image = self.flip(image)
+            image = np.array(image).astype(np.uint8)
         if self.return_uint8:
             example['image'] = image
         else:

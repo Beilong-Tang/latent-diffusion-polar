@@ -72,10 +72,12 @@ data:
       target: ldm.data.lsun.LSUNChurchesTrain
       params:
         size: 256
+        npy_file: /work/btang1/work/2026-08-05/latent-diffusion/workspace/lsun/lsun_churches_train.npy
     validation:
       target: ldm.data.lsun.LSUNChurchesValidation
       params:
         size: 256
+        npy_file: /work/btang1/work/2026-08-05/latent-diffusion/workspace/lsun/lsun_churches_val.npy
 
 lightning:
   callbacks:
