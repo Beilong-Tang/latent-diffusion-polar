@@ -19,6 +19,8 @@ from ldm.modules.diffusionmodules.util import (
 )
 from ldm.modules.attention import SpatialTransformer
 
+from blpytorch.utils.dprint import dprint
+
 
 # dummy replace
 def convert_module_to_f16(x):
@@ -502,6 +504,7 @@ class UNetModel(nn.Module):
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
         self.predict_codebook_ids = n_embed is not None
+        dprint(f"predict_codebook_ids is {self.predict_codebook_ids}")
 
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
