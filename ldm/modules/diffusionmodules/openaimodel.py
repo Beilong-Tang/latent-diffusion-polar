@@ -7,6 +7,7 @@ import numpy as np
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
+import json
 
 from ldm.modules.diffusionmodules.util import (
     checkpoint,
@@ -19,7 +20,10 @@ from ldm.modules.diffusionmodules.util import (
 )
 from ldm.modules.attention import SpatialTransformer
 
+from ldm.geometry import normalize
+
 from blpytorch.utils.dprint import dprint
+from blpytorch.utils import raise_unexpect
 
 
 # dummy replace
@@ -411,6 +415,42 @@ class QKVAttention(nn.Module):
     def count_flops(model, _x, y):
         return count_flops_attn(model, _x, y)
 
+class RadiusEmbedding(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(1, dim),
+            nn.SiLU(),
+            nn.Linear(dim, dim),
+        )
+    def forward(self, r):
+        # r: [B] or [B,1]
+        if r.dim() == 1:
+            r = r[:, None]
+        return self.net(r)
+
+class MLPPool(nn.Module):
+    def __init__(self, in_ch, width, hidden = True, hidden_scale=1.):
+        super().__init__()
+        if hidden:
+            input_dim = in_ch * width * width
+            hidden_dim = int(hidden_scale * input_dim)
+            self.module = nn.Sequential(
+                nn.Flatten(),
+                nn.Linear(input_dim, hidden_dim),
+                nn.SiLU(),
+                nn.Linear(hidden_dim, 1)
+            )
+        else:
+            self.module = nn.Sequential(
+                nn.Flatten(),
+                nn.SiLU(),
+                nn.Linear(in_ch * width * width, 1),
+            )
+
+    def forward(self, x):
+        out = self.module(x).squeeze(-1)
+        return out
 
 class UNetModel(nn.Module):
     """
@@ -468,6 +508,12 @@ class UNetModel(nn.Module):
         context_dim=None,                 # custom transformer support
         n_embed=None,                     # custom support for prediction of discrete ids into codebook of first stage vq model
         legacy=True,
+        # polar config
+        condition='concat',               # ['add', 'concat']
+        mlp_pool_hidden=False,            # by default this is disabled because otherwise too many parameters
+        hidden_scale=1.,
+        mean_std_json=None,
+        r_dim = None,                     # if specified, use r_dim
     ):
         super().__init__()
         if use_spatial_transformer:
@@ -505,6 +551,18 @@ class UNetModel(nn.Module):
         self.num_heads_upsample = num_heads_upsample
         self.predict_codebook_ids = n_embed is not None
         dprint(f"predict_codebook_ids is {self.predict_codebook_ids}")
+        self.condition = condition
+
+        if mean_std_json is not None:
+            print(f"loading mean and std for r from {mean_std_json}")
+            with open(mean_std_json, "r") as f:
+                res = json.load(f)
+                mean, std = res['mean'], res['std']
+        else:
+            mean, std = 0.0, 1.0
+
+        self.mean_r = mean
+        self.std_r = std
 
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
@@ -512,6 +570,17 @@ class UNetModel(nn.Module):
             nn.SiLU(),
             linear(time_embed_dim, time_embed_dim),
         )
+
+        # radius_emb
+        if r_dim is None:
+            r_dim = time_embed_dim
+        else:
+            assert self.condition == "concat", "r_dim is specified, this should be used in concat mode"
+        self.radius_emb = RadiusEmbedding(r_dim)
+        _hidden_width = image_size // 2**(len(channel_mult) -1)
+        self.radius_out = MLPPool(model_channels * channel_mult[-1], _hidden_width, hidden=mlp_pool_hidden, hidden_scale=hidden_scale)
+        emb_dim = time_embed_dim if self.condition == "add" else r_dim + time_embed_dim
+        assert self.condition in ['add', 'concat']
 
         if self.num_classes is not None:
             self.label_emb = nn.Embedding(num_classes, time_embed_dim)
@@ -532,7 +601,7 @@ class UNetModel(nn.Module):
                 layers = [
                     ResBlock(
                         ch,
-                        time_embed_dim,
+                        emb_dim,
                         dropout,
                         out_channels=mult * model_channels,
                         dims=dims,
@@ -570,7 +639,7 @@ class UNetModel(nn.Module):
                     TimestepEmbedSequential(
                         ResBlock(
                             ch,
-                            time_embed_dim,
+                            emb_dim,
                             dropout,
                             out_channels=out_ch,
                             dims=dims,
@@ -600,7 +669,7 @@ class UNetModel(nn.Module):
         self.middle_block = TimestepEmbedSequential(
             ResBlock(
                 ch,
-                time_embed_dim,
+                emb_dim,
                 dropout,
                 dims=dims,
                 use_checkpoint=use_checkpoint,
@@ -617,7 +686,7 @@ class UNetModel(nn.Module):
                         ),
             ResBlock(
                 ch,
-                time_embed_dim,
+                emb_dim,
                 dropout,
                 dims=dims,
                 use_checkpoint=use_checkpoint,
@@ -633,7 +702,7 @@ class UNetModel(nn.Module):
                 layers = [
                     ResBlock(
                         ch + ich,
-                        time_embed_dim,
+                        emb_dim,
                         dropout,
                         out_channels=model_channels * mult,
                         dims=dims,
@@ -667,7 +736,7 @@ class UNetModel(nn.Module):
                     layers.append(
                         ResBlock(
                             ch,
-                            time_embed_dim,
+                            emb_dim,
                             dropout,
                             out_channels=out_ch,
                             dims=dims,
@@ -727,15 +796,32 @@ class UNetModel(nn.Module):
         t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
         emb = self.time_embed(t_emb)
 
+        x_unit, r = normalize(x, return_norm=True)
+        r = (r - self.mean_r) / self.std_r
+
         if self.num_classes is not None:
+            raise_unexpect('num_classes is not None')
             assert y.shape == (x.shape[0],)
             emb = emb + self.label_emb(y)
+            
+        remb = self.radius_emb(r)
+        if self.condition == "add":
+            emb = emb + remb
+        elif self.condition == "concat":
+            emb = th.cat([remb, emb], dim = 1)
+        else:
+            raise ValueError(f"condition {self.condition} is not supported")
 
-        h = x.type(self.dtype)
+        h = x_unit.type(self.dtype)
         for module in self.input_blocks:
             h = module(h, emb, context)
             hs.append(h)
         h = self.middle_block(h, emb, context)
+        dprint(f"h shape is {h.shape}", "h_shape", test=True)
+
+        h_mid = h
+        radius_out = self.radius_out(h_mid)
+
         for module in self.output_blocks:
             h = th.cat([h, hs.pop()], dim=1)
             h = module(h, emb, context)
@@ -743,7 +829,7 @@ class UNetModel(nn.Module):
         if self.predict_codebook_ids:
             return self.id_predictor(h)
         else:
-            return self.out(h)
+            return self.out(h), radius_out
 
 
 class EncoderUNetModel(nn.Module):
@@ -963,3 +1049,22 @@ class EncoderUNetModel(nn.Module):
             h = h.type(x.dtype)
             return self.out(h)
 
+if __name__ == "__main__":
+    model = UNetModel(image_size=32, 
+                      in_channels=4, 
+                      model_channels=192, 
+                      out_channels=4, 
+                      attention_resolutions=[1,2,4,8],
+                      num_res_blocks=2,
+                      channel_mult=[ 1,2,2,4,4 ],
+                      num_heads=8,
+                      use_scale_shift_norm=True,
+                      resblock_updown=True,
+                      condition='concat',
+                      r_dim=192*2)
+    print(f"model params: {sum(i.numel() for i in model.parameters())}")
+    x = th.randn(4, 4, 32, 32)
+    timesteps = th.randint(0, 1000, (x.size(0),))
+    out = model(x, timesteps)
+    print(out[0].shape)
+    print(out[1].shape)
