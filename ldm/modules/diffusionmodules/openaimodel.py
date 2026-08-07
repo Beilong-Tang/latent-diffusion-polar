@@ -803,7 +803,7 @@ class UNetModel(nn.Module):
             raise_unexpect('num_classes is not None')
             assert y.shape == (x.shape[0],)
             emb = emb + self.label_emb(y)
-            
+
         remb = self.radius_emb(r)
         if self.condition == "add":
             emb = emb + remb
@@ -827,6 +827,7 @@ class UNetModel(nn.Module):
             h = module(h, emb, context)
         h = h.type(x.dtype)
         if self.predict_codebook_ids:
+            raise_unexpect("predict_codebook_ids should be false")
             return self.id_predictor(h)
         else:
             return self.out(h), radius_out
